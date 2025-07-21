@@ -23,7 +23,7 @@ RUN git clone --depth 1 https://github.com/CyberTimon/RapidRAW.git . && \
     strip target/release/rapidraw
 
 # Stage 2: ComfyUI dependencies
-FROM nvcr.io/nvidia/l4t-cuda:12.8.0-runtime-ubuntu22.04 AS comfyui-deps
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04 AS comfyui-deps
 
 # Install minimal Python and dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -64,7 +64,7 @@ RUN git clone --depth 1 https://github.com/ltdrdata/ComfyUI-Manager.git
 RUN pip cache purge
 
 # Stage 3: Final minimal runtime image
-FROM nvcr.io/nvidia/l4t-cuda:12.8.0-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 
 # Install only runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
