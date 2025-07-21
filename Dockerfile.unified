@@ -2,7 +2,7 @@
 # Stage 1: Build RapidRAW
 FROM dustynv/cuda-python:r36.4.0-cu128-24.04 AS rapidraw-builder
 
-# Install only essential build dependencies
+# Install build dependencies for Tauri app
 RUN apt update && apt install -y --no-install-recommends \
     curl \
     git \
@@ -10,23 +10,32 @@ RUN apt update && apt install -y --no-install-recommends \
     build-essential \
     pkg-config \
     libssl-dev \
+    libgtk-3-dev \
+    libwebkit2gtk-4.1-dev \
+    libayatana-appindicator3-dev \
+    librsvg2-dev \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust (minimal profile)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Clone and build RapidRAW
 WORKDIR /build
-RUN git clone --depth 1 https://github.com/CyberTimon/RapidRAW.git . && \
-    cargo build --release --features gpu-acceleration && \
-    strip target/release/rapidraw
+RUN git clone --depth 1 https://github.com/CyberTimon/RapidRAW.git .
+
+# Install Node dependencies and build
+RUN npm install && \
+    npm run tauri build -- --target aarch64-unknown-linux-gnu
+
+# The built binary will be in src-tauri/target/release/
 
 # Stage 2: ComfyUI dependencies
 FROM dustynv/cuda-python:r36.4.0-cu128-24.04 AS comfyui-deps
 
 # Install minimal Python and dependencies
-# Note: Ubuntu 24.04 uses Python 3.12, not 3.11
 RUN apt update && apt install -y --no-install-recommends \
     python3-minimal \
     python3-pip \
@@ -37,6 +46,7 @@ RUN apt update && apt install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     git \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Create virtual environment for isolation
@@ -44,8 +54,8 @@ RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Install PyTorch for Jetson with CUDA 12.8
-# Using the correct PyTorch wheel for Jetson
 RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir numpy && \
     pip install --no-cache-dir \
     torch torchvision torchaudio \
     --index-url https://pypi.jetson-ai-lab.dev/cu128/cp312
@@ -68,14 +78,18 @@ RUN pip cache purge
 # Stage 3: Final minimal runtime image
 FROM dustynv/cuda-python:r36.4.0-cu128-24.04
 
-# Install only runtime dependencies
+# Install runtime dependencies
 RUN apt update && apt install -y --no-install-recommends \
     python3-minimal \
     libgomp1 \
     libgl1 \
     libglib2.0-0 \
     libssl3 \
+    libgtk-3-0 \
+    libwebkit2gtk-4.1-0 \
+    libayatana-appindicator3-1 \
     curl \
+    xvfb \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -86,10 +100,11 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Copy ComfyUI
 COPY --from=comfyui-deps /comfyui /app/comfyui
 
-# Copy RapidRAW binary
-COPY --from=rapidraw-builder /build/target/release/rapidraw /usr/local/bin/
+# Copy RapidRAW binary and resources
+COPY --from=rapidraw-builder /build/src-tauri/target/release/rapid* /usr/local/bin/
+COPY --from=rapidraw-builder /build/src-tauri/target/release/bundle /app/rapidraw
 
-# Create necessary directories with proper permissions
+# Create necessary directories
 RUN mkdir -p \
     /app/models/checkpoints \
     /app/models/vae \
@@ -100,9 +115,44 @@ RUN mkdir -p \
     /app/config \
     && chmod -R 755 /app
 
-# Copy startup script
-COPY start.sh /app/start.sh
-RUN chmod +x /app/start.sh
+# Create a simplified startup script
+RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
+# Configure Jetson for maximum performance\n\
+if [ -f /usr/bin/jetson_clocks ]; then\n\
+    echo "Setting Jetson to maximum performance mode..."\n\
+    nvpmodel -m 0 || true\n\
+    jetson_clocks || true\n\
+fi\n\
+\n\
+# Start virtual display for RapidRAW (GUI app)\n\
+Xvfb :99 -screen 0 1920x1080x24 &\n\
+export DISPLAY=:99\n\
+\n\
+# Start ComfyUI API server\n\
+echo "Starting ComfyUI..."\n\
+cd /app/comfyui\n\
+python3 main.py \\\n\
+    --listen 0.0.0.0 \\\n\
+    --port ${COMFYUI_PORT:-8188} \\\n\
+    --gpu-only \\\n\
+    --highvram \\\n\
+    --preview-method none &\n\
+COMFYUI_PID=$!\n\
+\n\
+# Wait for ComfyUI to be ready\n\
+until curl -f http://localhost:${COMFYUI_PORT:-8188}/system_stats; do\n\
+    echo "Waiting for ComfyUI..."\n\
+    sleep 2\n\
+done\n\
+\n\
+echo "ComfyUI is ready!"\n\
+\n\
+# Since RapidRAW is a GUI app, we will need to create an API wrapper\n\
+# For now, just keep the container running\n\
+wait $COMFYUI_PID\n\
+' > /app/start.sh && chmod +x /app/start.sh
 
 # Environment variables for optimization
 ENV CUDA_MODULE_LOADING=LAZY \
@@ -114,11 +164,10 @@ ENV CUDA_MODULE_LOADING=LAZY \
     NVIDIA_DRIVER_CAPABILITIES=all \
     LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 \
     OMP_NUM_THREADS=8 \
-    RAPIDRAW_PORT=1420 \
     COMFYUI_PORT=8188
 
 # Expose ports
-EXPOSE 1420 8188
+EXPOSE 8188
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
