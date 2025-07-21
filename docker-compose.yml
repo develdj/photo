@@ -1,0 +1,108 @@
+version: '3.8'
+
+services:
+  rapidraw-comfyui:
+    build:
+      context: .
+      dockerfile: Dockerfile.unified
+    container_name: rapidraw-comfyui
+    restart: unless-stopped
+    runtime: nvidia
+    shm_size: '8gb'
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      stack:
+        soft: 67108864
+        hard: 67108864
+    environment:
+      # GPU Settings
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      # Memory optimization
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,garbage_collection_threshold:0.6
+      - CUDA_MODULE_LOADING=LAZY
+      # App settings
+      - RAPIDRAW_PORT=1420
+      - COMFYUI_PORT=8188
+      - RAPIDRAW_CACHE_SIZE=4096
+      - COMFYUI_MAX_QUEUE=50
+    volumes:
+      # Minimal volume mounts for efficiency
+      - models:/app/models:ro
+      - photos:/app/photos
+      - output:/app/output
+      - config:/app/config
+    ports:
+      - "1420:1420"  # RapidRAW
+      - "8188:8188"  # ComfyUI
+    networks:
+      - photo-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+        limits:
+          memory: 32G
+          cpus: '8'
+
+  n8n:
+    image: n8nio/n8n:latest-alpine  # Alpine for smaller size
+    container_name: n8n
+    restart: unless-stopped
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=admin
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD:-changeme}
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - NODE_ENV=production
+      - N8N_LOG_LEVEL=error
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - photos:/photos:ro
+    ports:
+      - "5678:5678"
+    networks:
+      - photo-network
+    mem_limit: 2g
+
+  ghost:
+    image: ghost:5-alpine
+    container_name: ghost
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - url=${GHOST_URL:-http://localhost:2368}
+    volumes:
+      - ghost-data:/var/lib/ghost/content
+    ports:
+      - "2368:2368"
+    networks:
+      - photo-network
+    mem_limit: 1g
+
+volumes:
+  models:
+    driver: local
+  photos:
+    driver: local
+  output:
+    driver: local
+  config:
+    driver: local
+  n8n-data:
+    driver: local
+  ghost-data:
+    driver: local
+
+networks:
+  photo-network:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: 1450  # Optimize for Jetson

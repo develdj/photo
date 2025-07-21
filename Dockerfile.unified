@@ -1,0 +1,129 @@
+# Multi-stage build for minimal final image
+# Stage 1: Build RapidRAW
+FROM nvcr.io/nvidia/l4t-cuda:12.8.0-devel-ubuntu22.04 AS rapidraw-builder
+
+# Install only essential build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    ca-certificates \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust (minimal profile)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Clone and build RapidRAW
+WORKDIR /build
+RUN git clone --depth 1 https://github.com/CyberTimon/RapidRAW.git . && \
+    cargo build --release --features gpu-acceleration && \
+    strip target/release/rapidraw
+
+# Stage 2: ComfyUI dependencies
+FROM nvcr.io/nvidia/l4t-cuda:12.8.0-runtime-ubuntu22.04 AS comfyui-deps
+
+# Install minimal Python and dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11-minimal \
+    python3-pip \
+    python3-setuptools \
+    python3-wheel \
+    libgomp1 \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create virtual environment for isolation
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install PyTorch for Jetson with CUDA 12.8
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+    torch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 \
+    --index-url https://developer.download.nvidia.com/compute/redist/jp/v60/pytorch/
+
+# Clone ComfyUI (shallow clone for size)
+WORKDIR /comfyui
+RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git . && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir \
+    onnxruntime-gpu \
+    tensorrt \
+    pycuda
+
+# Install minimal ComfyUI-Manager
+WORKDIR /comfyui/custom_nodes
+RUN git clone --depth 1 https://github.com/ltdrdata/ComfyUI-Manager.git
+
+# Clean up pip cache
+RUN pip cache purge
+
+# Stage 3: Final minimal runtime image
+FROM nvcr.io/nvidia/l4t-cuda:12.8.0-runtime-ubuntu22.04
+
+# Install only runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11-minimal \
+    libgomp1 \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libssl3 \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Copy Python virtual environment from build stage
+COPY --from=comfyui-deps /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy ComfyUI
+COPY --from=comfyui-deps /comfyui /app/comfyui
+
+# Copy RapidRAW binary
+COPY --from=rapidraw-builder /build/target/release/rapidraw /usr/local/bin/
+
+# Create necessary directories with proper permissions
+RUN mkdir -p \
+    /app/models/checkpoints \
+    /app/models/vae \
+    /app/models/loras \
+    /app/output \
+    /app/input \
+    /app/photos \
+    /app/config \
+    && chmod -R 755 /app
+
+# Copy startup script
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
+# Environment variables for optimization
+ENV CUDA_MODULE_LOADING=LAZY \
+    PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:512,garbage_collection_threshold:0.6" \
+    CUDA_LAUNCH_BLOCKING=0 \
+    CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+    TORCH_CUDA_ARCH_LIST="8.7" \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=all \
+    LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 \
+    OMP_NUM_THREADS=8 \
+    RAPIDRAW_PORT=1420 \
+    COMFYUI_PORT=8188
+
+# Expose ports
+EXPOSE 1420 8188
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8188/system_stats || exit 1
+
+# Set working directory
+WORKDIR /app
+
+# Entry point
+ENTRYPOINT ["/app/start.sh"]

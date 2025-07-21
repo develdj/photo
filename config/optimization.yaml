@@ -1,0 +1,47 @@
+# ComfyUI optimization settings
+comfyui:
+  model_loading:
+    # Load models on demand to save memory
+    lazy_load: true
+    # Unload unused models after 5 minutes
+    unload_timeout: 300
+    # Maximum models in memory
+    max_loaded_models: 2
+  
+  inference:
+    # Use FP16 for faster inference
+    precision: fp16
+    # Batch size for processing
+    batch_size: 1
+    # Enable TensorRT optimization
+    use_tensorrt: true
+    # Cache compiled models
+    cache_dir: /app/models/.cache
+  
+  memory:
+    # Aggressive garbage collection
+    gc_threshold: 0.6
+    # Clear cache between runs
+    clear_cache_after_run: true
+
+# RapidRAW optimization settings
+rapidraw:
+  gpu:
+    # Use GPU for all operations
+    force_gpu: true
+    # Memory pool size (MB)
+    memory_pool: 4096
+  
+  cache:
+    # Image cache size (MB)
+    size: 2048
+    # Cache eviction policy
+    policy: lru
+    # Compress cached images
+    compression: true
+  
+  processing:
+    # Number of worker threads
+    threads: 8
+    # Queue size
+    max_queue: 100
